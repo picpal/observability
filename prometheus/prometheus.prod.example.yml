@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: message-gate
+    metrics_path: /actuator/prometheus
+    scheme: http
+    static_configs:
+      - targets:
+          - mg-was-1.internal:9090
+          - mg-was-2.internal:9090
+        labels:
+          environment: prod
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '([^:]+)(:.*)?'
+        target_label: instance
+        replacement: '$1'

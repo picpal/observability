@@ -1,0 +1,8 @@
+.DS_Store
+*.swp
+*.swo
+*.log
+
+# Grafana / Prometheus volume mounts (compose-managed)
+prometheus/data/
+grafana/data/

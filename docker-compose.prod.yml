@@ -1,0 +1,61 @@
+# 폐쇄망 운영용 Monitoring VM 스택 (Prometheus + Grafana)
+#
+# 로컬 검수용 docker-compose.yml 과 별개다. 로컬용은 익명 admin / retention 2h /
+# host.docker.internal scrape 로 "개발자 검수" 전용이고, 본 파일은 폐쇄망 운영 VM 1대에
+# 올리는 운영 스택이다.
+#
+# 기동:   docker compose -f docker-compose.prod.yml up -d
+# 중지:   docker compose -f docker-compose.prod.yml down          # 볼륨 유지 (-v 금지)
+#
+# 사전 준비 (docs/install-airgap.md 참조):
+#   - prom/prometheus, grafana/grafana 이미지를 docker load 로 반입
+#   - prometheus.prod.yml 의 targets[] 를 실제 WAS/nginx 호스트로 교체
+#   - .env 파일에 GF_SECURITY_ADMIN_PASSWORD 설정 (레포에 커밋 금지)
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: mg-prometheus
+    ports:
+      # 외부 비노출 원칙. VM 로컬(127.0.0.1)에만 바인딩 → Grafana 는 compose 내부망으로 접근,
+      # 운영자 직접 확인은 SSH 터널 (ssh -L 9090:localhost:9090 monitoring-vm).
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus/prometheus.prod.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d        # 운영 보관 기간. 디스크 여유 보고 조정
+      - --web.enable-lifecycle                    # POST /-/reload 로 무중단 설정 반영
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: mg-grafana
+    ports:
+      # 운영자/대시보드 접근용. 사내망 한정 — 가능하면 앞단에 nginx+TLS 리버스 프록시 권장.
+      - "3000:3000"
+    environment:
+      # 익명 접근 전면 차단 (로컬 검수 compose 와 가장 큰 차이).
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_SECURITY_ADMIN_PASSWORD:?set in .env}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_DEFAULT_THEME: dark
+      # 폐쇄망 — 외부 플러그인/뉴스/업데이트 체크 비활성화 (불필요한 아웃바운드 시도 제거).
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:        # TSDB — 삭제 시 누적 메트릭 전부 소실
+  grafana-data:           # Grafana DB (사용자/설정/대시보드 편집분)

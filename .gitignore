@@ -6,3 +6,7 @@
 # Grafana / Prometheus volume mounts (compose-managed)
 prometheus/data/
 grafana/data/
+
+# 운영 설정 — 실 IP/호스트/비밀번호 포함 (커밋 금지, 템플릿만 커밋)
+prometheus/prometheus.prod.yml
+.env

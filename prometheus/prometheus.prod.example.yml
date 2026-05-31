@@ -1,11 +1,21 @@
+# 폐쇄망 운영용 Prometheus 설정 템플릿.
+#
+# 사용법: 이 파일을 prometheus.prod.yml 로 복사한 뒤 targets[] 를 실제 호스트로 교체한다.
+#   cp prometheus.prod.example.yml prometheus.prod.yml
+# (prometheus.prod.yml 은 실 IP/호스트를 담으므로 .gitignore 처리 — 커밋 금지)
+#
+# docker-compose.prod.yml 이 prometheus.prod.yml 을 마운트한다.
+
 global:
   scrape_interval: 10s
   evaluation_interval: 10s
 
 scrape_configs:
+  # ── message-gate WAS (Spring Boot Actuator) ──────────────────────────────
   - job_name: message-gate
     metrics_path: /actuator/prometheus
-    scheme: http
+    scheme: http                  # 9090 은 TLS 미적용 (내부망 ACL 의존)
+    scrape_timeout: 5s
     static_configs:
       - targets:
           - mg-was-1.internal:9090
@@ -13,7 +23,40 @@ scrape_configs:
         labels:
           environment: prod
     relabel_configs:
+      # mg-was-1.internal:9090 → instance="mg-was-1" (Grafana legend 단축)
       - source_labels: [__address__]
-        regex: '([^:]+)(:.*)?'
+        regex: 'mg-was-([0-9]+)\..+'
+        replacement: was-$1
         target_label: instance
-        replacement: '$1'
+
+  # ── nginx (stub_status → nginx-prometheus-exporter) ──────────────────────
+  # 각 WAS 호스트에 nginx-prometheus-exporter 를 9113 으로 띄운다 (설치는
+  # docs/install-airgap.md §App 서버 참조). exporter 가 로컬 nginx 의
+  # /stub_status 를 읽어 Prometheus 포맷으로 노출한다.
+  - job_name: nginx
+    scheme: http
+    scrape_timeout: 5s
+    static_configs:
+      - targets:
+          - mg-was-1.internal:9113
+          - mg-was-2.internal:9113
+        labels:
+          environment: prod
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: 'mg-was-([0-9]+)\..+'
+        replacement: was-$1
+        target_label: instance
+
+  # ── (선택) OS 자원 — node_exporter ───────────────────────────────────────
+  # OS CPU/메모리/디스크가 필요해지면 각 WAS 에 node_exporter(9100)를 추가하고
+  # 아래 job 의 주석을 해제한다. nginx job 과 동일한 반입/방화벽 패턴.
+  # - job_name: node
+  #   static_configs:
+  #     - targets: [mg-was-1.internal:9100, mg-was-2.internal:9100]
+  #       labels: { environment: prod }
+  #   relabel_configs:
+  #     - source_labels: [__address__]
+  #       regex: 'mg-was-([0-9]+)\..+'
+  #       replacement: was-$1
+  #       target_label: instance

@@ -9,9 +9,9 @@
 |---|---|---|
 | message-gate 인스턴스 | Active-Active 2대 (운영 표준) | `mg-was-1.internal`, `mg-was-2.internal` |
 | 앱 포트 | 7700 (TLS 1.2, 메인 API) | 사내 ACL 으로 외부 차단 |
-| 관측 포트 | 9090 (평문, Prometheus scrape 전용) | 사내 Prometheus IP 만 allow |
-| Prometheus | 1대, scrape interval 10s | 사내 운영 |
-| Grafana 폴더 | `Dashboards/message-gate` | 사내 운영 |
+| 관측 포트 | 9090 (WAS actuator, 평문), 9113 (nginx exporter) | Monitoring VM IP 만 allow |
+| Prometheus / Grafana | 폐쇄망 **Monitoring VM 1대** (docker compose), scrape 10s | `install-airgap.md` |
+| Grafana 폴더 | `Dashboards/message-gate`, `nginx` | Monitoring VM |
 
 **중요한 라벨 구분** — 알람을 보거나 PromQL 을 쓸 때 자주 혼동된다.
 

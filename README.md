@@ -14,17 +14,22 @@
 ```
 observability/
 ├── docker-compose.yml                          # 로컬 검수 stack (Prometheus + Grafana)
+├── docker-compose.prod.yml                     # 폐쇄망 운영 stack (실인증·영속볼륨·retention)
 ├── prometheus/
 │   ├── prometheus.yml                          # 로컬 검수 (host.docker.internal scrape)
-│   └── prometheus.prod.example.yml             # 운영 템플릿 — 인프라팀 작업 기준
+│   └── prometheus.prod.example.yml             # 운영 템플릿 (message-gate + nginx job)
 ├── grafana/
 │   ├── provisioning/
 │   │   ├── datasources/prometheus.yml          # 자동 등록 (uid: prometheus)
 │   │   └── dashboards/dashboards.yml           # 자동 등록 (folder: message-gate)
 │   └── dashboards/
-│       └── message-gate.json                   # per-instance 비교 대시보드
+│       ├── message-gate.json                   # per-instance 비교 대시보드
+│       ├── jvm.json                            # JVM 런타임 (actuator/Micrometer)
+│       └── nginx.json                          # nginx stub_status 대시보드
 └── docs/
     ├── setup.md                                # 전체 설계 + 운영 가이드
+    ├── install-airgap.md                       # 폐쇄망 반입 + 설치 가이드 (Monitoring VM)
+    ├── security-review.md                      # 폐쇄망 반입 보안심의 근거 자료
     └── runbook-message-gate.md                 # 1페이지 운영 런북
 ```
 
@@ -44,14 +49,17 @@ stop & clean:
 docker compose down -v
 ```
 
-## 운영 적용 (인프라팀)
+## 운영 적용 (폐쇄망 Monitoring VM)
 
-1. `prometheus/prometheus.prod.example.yml` 을 사내 prometheus 서버의 `prometheus.yml` 베이스로 사용.
-   - `targets[]` 를 실제 WAS 호스트로 교체.
-   - 사내 ACL 로 prometheus 서버 IP 만 각 WAS 의 9090 포트에 접근 가능하도록 한다.
-2. Grafana 측에 `grafana/dashboards/message-gate.json` 을 import.
-   - datasource UID 는 `prometheus` 로 통일 (다른 datasource 면 JSON 의 `uid` 일괄 치환).
-3. 알람 룰 (alertmanager) 은 `docs/setup.md §6` 참고.
+운영 환경의 "사내 Prometheus/Grafana" 는 **온프렘 폐쇄망 Monitoring VM 1대에 `docker-compose.prod.yml`**
+로 구축한다. 반입(docker save/load)·설치·App 서버 nginx exporter 설치·방화벽까지 전 과정은
+**[`docs/install-airgap.md`](docs/install-airgap.md)** 참조. 요약:
+
+1. 인터넷 호스트에서 이미지 번들 생성(`docker save`) → 승인 매체로 반입 → Monitoring VM 에서 `docker load`.
+2. `prometheus.prod.example.yml` → `prometheus.prod.yml` 복사 후 `targets[]` 를 실제 WAS 호스트로 교체
+   (message-gate 9090 + nginx exporter 9113). 각 WAS 의 OS 방화벽은 Monitoring VM IP 만 inbound allow.
+3. `docker compose -f docker-compose.prod.yml up -d` — 대시보드/datasource 는 provisioning 으로 자동 등록.
+4. 알람 룰 (alertmanager) 은 `docs/setup.md §6` 참고.
 
 ## 신규 서비스 추가 절차
 

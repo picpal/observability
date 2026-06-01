@@ -28,7 +28,7 @@
 ```
 
 - **scrape 방향**: Monitoring VM → 각 WAS (pull). 따라서 방화벽은 **WAS 쪽 inbound** 를 연다.
-- **반입 대상**: docker 이미지 3종 + 이 레포의 설정 파일. (Grafana 외부 플러그인 없음 → 플러그인 번들 불필요)
+- **반입 대상**: docker 이미지 3종(+옵션 blackbox 1종, 부록 A) + 이 레포의 설정 파일. (Grafana 외부 플러그인 없음 → 플러그인 번들 불필요)
 
 ---
 
@@ -61,13 +61,16 @@ mkdir -p mg-observability-bundle/images && cd mg-observability-bundle
 PROM=prom/prometheus:v2.54.1
 GRAF=grafana/grafana:11.2.2
 NGEX=nginx/nginx-prometheus-exporter:1.5.1
+# (옵션) 네트워크 도달성/RTT probe 용 — 부록 A 에서 연동. 지금 당장 안 쓰더라도
+# 재반입 사이클을 피하려 번들엔 미리 포함해 둔다. (확인일 기준 v0.25.0 — 재확인 권장)
+BLBX=prom/blackbox-exporter:v0.25.0
 
-for IMG in "$PROM" "$GRAF" "$NGEX"; do
+for IMG in "$PROM" "$GRAF" "$NGEX" "$BLBX"; do
   docker pull --platform linux/amd64 "$IMG"
 done
 
 # 단일 tar 로 저장 (load 시 태그 그대로 복원됨)
-docker save "$PROM" "$GRAF" "$NGEX" -o images/observability-images.tar
+docker save "$PROM" "$GRAF" "$NGEX" "$BLBX" -o images/observability-images.tar
 ```
 
 ### 2.2 레포 설정 파일 동봉
@@ -275,6 +278,94 @@ Grafana(`:3000`) 로그인 → 좌측 Dashboards 에 message-gate / nginx 대시
 | **백업** | named volume `prometheus-data`(TSDB), `grafana-data`(대시보드 편집분/사용자) 를 `docker run --rm -v <vol>:/v -v $PWD:/b alpine tar czf /b/<vol>.tgz -C /v .` 로 주기 백업 |
 | **데이터 보존기간 조정** | compose 의 `--storage.tsdb.retention.time` 수정 후 `up -d` |
 | **중지(데이터 유지)** | `docker compose -f docker-compose.prod.yml down` — **`-v` 금지** (붙이면 볼륨 삭제로 메트릭/대시보드 소실) |
+
+---
+
+## 부록 A. (옵션) blackbox-exporter — 네트워크 도달성 / RTT probe
+
+actuator·nginx-exporter 는 **앱 내부**(화이트박스: GC, 힙, 요청 처리시간)를 본다.
+순수 전송계층 — **호스트 도달성, ping RTT, 포트 connect 지연, TLS 만료** — 은 외부에서
+대상을 찔러보는(블랙박스) probe 가 필요하다. 그 역할이 blackbox-exporter.
+
+- **설치 위치**: 앱 서버가 아니라 **Monitoring VM** (Prometheus 옆). 대상은 손대지 않는다(agentless).
+- **언제 켜나**: 코어 스택(actuator+nginx)을 먼저 운영·숙지한 뒤, "느린데 네트워크인지
+  앱인지" 구분이 필요해질 때. WAS 2대가 동일 서브넷이라 평시 RTT 가치는 낮음 → 급하지 않다.
+- **이미지는 §2.1 에서 이미 번들에 포함** 되어 있으므로 재반입 불필요. 아래 설정만 켜면 된다.
+
+### A.1 probe 모듈 정의
+
+```bash
+mkdir -p blackbox
+cat > blackbox/blackbox.yml <<'EOF'
+modules:
+  icmp:                      # ping — 도달성 + RTT
+    prober: icmp
+  tcp_connect:               # 포트 connect 시간 (예: 9090/9113/7700)
+    prober: tcp
+    timeout: 5s
+EOF
+```
+
+### A.2 docker-compose.prod.yml 에 서비스 추가
+
+```yaml
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: mg-blackbox-exporter
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/blackbox_exporter/config.yml
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    # ICMP probe 는 raw socket 권한이 필요
+    cap_add:
+      - NET_RAW
+```
+
+> `icmp` probe 만 `NET_RAW` 가 필요하다. `tcp`/`http` 만 쓸 거면 `cap_add` 는 빼도 된다.
+
+### A.3 prometheus.prod.yml 에 probe job 추가
+
+핵심: **Prometheus 는 blackbox-exporter 를 스크랩하고, exporter 가 실제 대상을 probe** 한다.
+일반 job 과 달리 타깃과 스크랩 대상이 분리되며, 그 연결을 relabel 이 한다.
+
+```yaml
+  - job_name: blackbox-icmp
+    metrics_path: /probe
+    params:
+      module: [icmp]
+    static_configs:
+      - targets:                       # ← probe 할 실제 대상
+          - mg-was-1.internal
+          - mg-was-2.internal
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target       # 대상 → probe 파라미터
+      - source_labels: [__param_target]
+        target_label: instance              # 대시보드/알람용 라벨 보존
+      - target_label: __address__
+        replacement: blackbox-exporter:9115 # 실제 스크랩 대상은 exporter
+```
+
+reload: `curl -X POST http://localhost:9090/-/reload` (재기동 불필요).
+
+### A.4 검증 + 주요 메트릭
+
+```bash
+# Prometheus targets 에 blackbox-icmp 2개 UP 확인 후
+curl -s 'http://localhost:9090/api/v1/query?query=probe_success' | \
+  python3 -c "import sys,json;[print(r['metric'].get('instance'),r['value'][1]) for r in json.load(sys.stdin)['data']['result']]"
+```
+
+| 메트릭 | 의미 |
+|---|---|
+| `probe_success` | 1=도달 0=실패 (도달성 알람의 기준) |
+| `probe_duration_seconds` | probe 총 소요 — 네트워크 지연 추세 |
+| `probe_icmp_duration_seconds{phase="rtt"}` | ping RTT |
+| `probe_ssl_earliest_cert_expiry` | (http probe 시) 인증서 만료 임박 알람용 |
+
+> Grafana 패널은 공용 대시보드 [ID 7587](https://grafana.com/grafana/dashboards/7587)(Blackbox Exporter)을
+> 폐쇄망에선 JSON 으로 받아 `grafana/dashboards/` 에 동봉해 반입하면 된다. (인터넷 호스트에서 export)
 
 ---
 
